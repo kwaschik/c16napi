@@ -462,8 +462,7 @@ double _dateTimeToUnixTimeStamp(vDATE date, vTIME time) {
     return (double) (mktime(&_time) * 1000);
 }
 
-// Metadaten aller Prozeduren einer CONZEPT 16 Datenbank lesen
-// TODO options (user data) nutzen, für den Fall, nur eine?
+// Metadaten aller Prozeduren oder nur von einer Prozedur aus einer CONZEPT 16 Datenbank lesen
 // TODO zweite temp. Instanz öffnen, um Sperrstatus und sperrenden Benutzer zu ermitteln
 //      dazu müssten für die übergebene Instanz die Verbindungsinfos gespeichert sein,
 //      damit man mit diesen Infos eine weitere Instanz und DB-Verbindung öffnen kann,
@@ -479,7 +478,7 @@ napi_value c16GetProcsMetadata(napi_env env, napi_callback_info args) {
     vPHANDLE hInstance;
     // Übernahme des C16-DB-Instanz-Handles aus JavaScript
     int64_t instance;
-
+    // falls nur eine Prozedur abgefragt wird
     vCHAR procedureName[100];
 
     // Text-Handle
@@ -490,7 +489,7 @@ napi_value c16GetProcsMetadata(napi_env env, napi_callback_info args) {
     
     // Funktionsargumente lesen, erwartet wird:
     // - das DB-Instanz-Handle
-    // - Prozedurname
+    // - falls nur eine Prozedur abgefragt wird: Prozedurname
     // - welche Funktion in welchem Modus ausgeführt wird, wird über die options (user data) gesteuert
 
     // Funktionsargumente lesen, erwartet wird das DB-Instanz-Handle, also mind. ein int64-Wert, | mz: und Procname
@@ -505,24 +504,21 @@ napi_value c16GetProcsMetadata(napi_env env, napi_callback_info args) {
     }
     
     switch (options->func) {
-        case c16napi_fun_getprocmetadata:
-        {
+        case c16napi_fun_getprocmetadata: {
             if (argc < 2) {
                 napi_throw_error(env, C16NAPI_ERR_ARGCOUNT, "Es müssen mindestens zwei Funktionsargumente übergeben werden!");
                 return NULL;
             }
             break;
         } 
-        case c16napi_fun_getprocsmetadata:
-        {
+        case c16napi_fun_getprocsmetadata: {
             if (argc < 1) {
                 napi_throw_error(env, C16NAPI_ERR_ARGCOUNT, "Es muss mindestens ein Funktionsargument übergeben werden!");
                 return NULL;
             }
             break;
         }
-        default: 
-        {
+        default: {
             napi_throw_error(env, C16NAPI_ERR_GENERIC, "Fehler beim Lesen der Funktionsoptionen!");
             return NULL;
         }
@@ -530,6 +526,7 @@ napi_value c16GetProcsMetadata(napi_env env, napi_callback_info args) {
 
     // Elemente, um die Metadata-Infos zu den Prozeduren zusammenzustellen
     // in dieser Form: [{Name: "Name", Size: size, Creator: "Creator", Modifier: "Modifier", Ctime: time, Mtime: time}, ...]
+    // bzw. als einzelnes Element statt als Array, falls nur eine Prozedur abgefragt wird
     napi_value keyProcName;
     napi_value procName;
     napi_value keyProcSize;
@@ -575,20 +572,20 @@ napi_value c16GetProcsMetadata(napi_env env, napi_callback_info args) {
         if (nErg == C16ERR_OK) {
             vC16_TextInfo procInfo; 
             procInfo.InfoSize = sizeof(vC16_TextInfo);
-            uint32_t i = 0;
 
             if (options->func == c16napi_fun_getprocmetadata) {
+                // falls eine bestimmte Prozedur abgefragt wird, nur diese lesen
                 nErg = C16_TextRead(hProc, procedureName, 0, &procInfo);
-
             } else {
+                // falls alle Prozeduren abgefragt werden, zunächst die erste lesen, dann in Schleife einsteigen
                 nErg = C16_TextRead(hProc, NULL, _TextFirst, &procInfo);
-
             }
 
+            uint32_t i = 0;
             // auch bei Berechtigungsproblemen erfährt man den Textnamen 
             while (nErg == C16ERR_OK || nErg == C16ERR_TEXT_RIGHTS) {
                 // TODO, C16 macht nicht utf8 und auch nicht wirklich latin1 (c16-Kodierung), 
-                // aber latin1 geht in beide Richtungen
+                // aber latin1 geht wenigstens in beide Richtungen
                 if (   napi_create_object(env, &proc) != napi_ok
                     || napi_create_string_latin1(env, procInfo.TextName, NAPI_AUTO_LENGTH, &procName) != napi_ok
                     || napi_set_property(env, proc, keyProcName, procName) != napi_ok
@@ -607,9 +604,11 @@ napi_value c16GetProcsMetadata(napi_env env, napi_callback_info args) {
                         napi_throw_error(env, C16NAPI_ERR_GENERIC, "Fehler beim Ermitteln der Metadaten!");
                         return NULL;
                     }
-                if (options->func == c16napi_fun_getprocmetadata) {
+
+                // abbrechen, denn falls nur eine Prozedur abgefragt wird, sind wir fertig 
+                if (options->func == c16napi_fun_getprocmetadata) 
                     break;
-                }  
+                
                 nErg = C16_TextRead(hProc, NULL, _TextNext, &procInfo);
                 i++;
             }
@@ -629,10 +628,9 @@ napi_value c16GetProcsMetadata(napi_env env, napi_callback_info args) {
         napi_valuetype result;
         status = napi_typeof(env, proc, &result);
         //todo: Diese Überrpüfung muss unter Umtänden angepasst werden, wenn proc nicht mehr typeof object sein könnte!!!
-        if (status == napi_ok && result == napi_object) {
-            
+        if (status == napi_ok && result == napi_object)
             return  proc;
-        } else {
+        else {
             napi_throw_error(env, C16NAPI_ERR_GENERIC, "Prozedur ist nicht vorhanden!");
             return NULL;
         }
@@ -1166,7 +1164,8 @@ napi_value init(napi_env env, napi_value exports) {
         opt_getprocmetadata->funcopts = 0;
     }
 
-    if (!opt_lock || !opt_unlock || !opt_create || !opt_delete || !opt_copy || !opt_rename || !opt_getprocsmetadata || !opt_getprocmetadata) {
+    if (!opt_lock || !opt_unlock || !opt_create || !opt_delete || !opt_copy || !opt_rename || 
+        !opt_getprocsmetadata || !opt_getprocmetadata) {
         if (opt_lock) free(opt_lock);
         if (opt_unlock) free(opt_unlock);
         if (opt_create) free(opt_create);
@@ -1175,12 +1174,10 @@ napi_value init(napi_env env, napi_value exports) {
         if (opt_rename) free(opt_rename);
         if (opt_getprocsmetadata) free(opt_getprocsmetadata);
         if (opt_getprocmetadata) free(opt_getprocmetadata);
-
         napi_throw_error(env, C16NAPI_ERR_GENERIC, "Fehler beim Initialisieren des Moduls!");
         return NULL;
     }
 
-    //todo: mz simple proc finalizer nutzen
     // init der Funktionen mit user data
     if (   napi_create_function(env, NULL, 0, c16SimpleProcFuns, opt_lock, &c16LockProcFun) != napi_ok
         || napi_set_named_property(env, exports, "c16LockProc", c16LockProcFun) != napi_ok
@@ -1197,19 +1194,15 @@ napi_value init(napi_env env, napi_value exports) {
         || napi_create_function(env, NULL, 0, c16SimpleProcFuns, opt_copy, &c16CopyProcFun) != napi_ok
         || napi_set_named_property(env, exports, "c16CopyProc", c16CopyProcFun) != napi_ok
         || napi_add_finalizer(env, c16CopyProcFun, opt_copy, c16SimpleProcFunsFinalizer, NULL, NULL) != napi_ok
-
         || napi_create_function(env, NULL, 0, c16SimpleProcFuns, opt_rename, &c16RenameProcFun) != napi_ok
         || napi_set_named_property(env, exports, "c16RenameProc", c16RenameProcFun) != napi_ok
         || napi_add_finalizer(env, c16RenameProcFun, opt_rename, c16SimpleProcFunsFinalizer, NULL, NULL) != napi_ok
-
         || napi_create_function(env, NULL, 0, c16GetProcsMetadata, opt_getprocsmetadata, &c16GetProcsMetadataFun) != napi_ok
         || napi_set_named_property(env, exports, "c16GetProcsMetadata", c16GetProcsMetadataFun) != napi_ok
         || napi_add_finalizer(env, c16RenameProcFun, opt_getprocsmetadata, c16SimpleProcFunsFinalizer, NULL, NULL) != napi_ok
-
         || napi_create_function(env, NULL, 0, c16GetProcsMetadata, opt_getprocmetadata, &c16GetProcMetadataFun) != napi_ok
         || napi_set_named_property(env, exports, "c16GetProcMetadata", c16GetProcMetadataFun) != napi_ok
         || napi_add_finalizer(env, c16RenameProcFun, opt_getprocmetadata, c16SimpleProcFunsFinalizer, NULL, NULL) != napi_ok
-
         ) {
             if (opt_lock) free(opt_lock);
             if (opt_unlock) free(opt_unlock);
@@ -1217,6 +1210,8 @@ napi_value init(napi_env env, napi_value exports) {
             if (opt_delete) free(opt_delete);
             if (opt_copy) free(opt_copy);
             if (opt_rename) free(opt_rename);
+            if (opt_getprocsmetadata) free(opt_getprocsmetadata);
+            if (opt_getprocmetadata) free(opt_getprocmetadata);
             napi_throw_error(env, C16NAPI_ERR_GENERIC, "Fehler beim Initialisieren des Moduls!");
             return NULL;
         }
